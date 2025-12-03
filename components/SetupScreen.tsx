@@ -65,11 +65,15 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onComplete }) => {
     }
   };
 
+  const [isStarting, setIsStarting] = useState(false);
+
   const handleStart = () => {
     if (players.length > 0) {
-      onComplete(players);
+      setIsStarting(true);
+      // Small delay to show loading state
+      setTimeout(() => onComplete(players), 500);
     } else if (name && alias && avatarUrl) {
-      // If one player is ready but not added to list yet
+      setIsStarting(true);
       const newPlayer: Player = {
         id: Date.now().toString(),
         name,
@@ -77,7 +81,7 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onComplete }) => {
         avatarUrl,
         score: 0
       };
-      onComplete([newPlayer]);
+      setTimeout(() => onComplete([newPlayer]), 500);
     }
   };
 
@@ -101,6 +105,9 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onComplete }) => {
                   onChange={(e) => setName(e.target.value)}
                   className="w-full bg-dart-dark border border-gray-700 rounded-lg py-3 px-4 pl-10 focus:outline-none focus:border-dart-accent transition-colors"
                   placeholder="John Doe"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && name) handleGenerateIdentity();
+                  }}
                 />
                 <User className="absolute left-3 top-3.5 h-5 w-5 text-gray-500" />
               </div>
@@ -211,7 +218,7 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onComplete }) => {
 
             <div className="space-y-3">
               {players.map((p, idx) => (
-                <div key={p.id} className="bg-gray-800 p-3 rounded-lg flex items-center gap-3 border border-gray-700">
+                <div key={p.id} className="bg-gray-800 p-3 rounded-lg flex items-center gap-3 border border-gray-700 animate-fade-in">
                   <img src={p.avatarUrl} alt={p.alias} className="w-10 h-10 rounded-full border border-dart-accent" />
                   <div>
                     <div className="font-bold text-white text-sm">{p.alias}</div>
@@ -230,11 +237,20 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onComplete }) => {
 
           <button
             onClick={handleStart}
-            disabled={players.length === 0 && !alias}
-            className="w-full py-4 bg-dart-green hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xl shadow-lg shadow-green-900/50 flex items-center justify-center space-x-2 animate-pulse-slow"
+            disabled={(players.length === 0 && !alias) || isStarting}
+            className="w-full py-4 bg-dart-green hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xl shadow-lg shadow-green-900/50 flex items-center justify-center space-x-2 transition-all"
           >
-            <span>Enter the Arena</span>
-            <ChevronRight className="h-6 w-6" />
+            {isStarting ? (
+              <>
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span>Entering Arena...</span>
+              </>
+            ) : (
+              <>
+                <span>Enter the Arena</span>
+                <ChevronRight className="h-6 w-6" />
+              </>
+            )}
           </button>
         </div>
 
