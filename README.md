@@ -86,6 +86,20 @@ npm run dev
 http://localhost:3000
 ```
 
+### 🌐 Local Network Play (Multi-Device)
+
+To play with friends on the same WiFi (e.g., using a tablet as a scoreboard):
+
+1. **Find your computer's local IP address:**
+   - Mac: `ipconfig getifaddr en0` (usually 192.168.x.x)
+   - Windows: `ipconfig`
+
+2. **Open on mobile/tablet:**
+   - Enter `http://YOUR_IP_ADDRESS:3000` in the browser
+   - Example: `http://192.168.1.15:3000`
+
+> **Note:** For the IP Camera feature to work, you must use `http://` (not https) on your local network to avoid "Mixed Content" security blocks, as most IP cameras stream over HTTP.
+
 ## 📷 Camera Setup (Optional)
 
 ### Supported Cameras
