@@ -1,0 +1,5 @@
+{
+  "name": "DartMaster AI",
+  "description": "An AI-powered dart companion app featuring avatar generation, witty alias creation, game scoring with a crazy host voice, and an expert chatbot.",
+  "requestFramePermissions": []
+}
