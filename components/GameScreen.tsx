@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Player, GameMode, DartThrow, Round, Multiplier, DetectedThrow } from '../types';
-import { Mic, MicOff, ArrowLeft, Lightbulb, Award, Target, Trash2, Camera, Settings, Loader, Users } from 'lucide-react';
+import { Mic, MicOff, ArrowLeft, Lightbulb, Award, Target, Trash2, Camera, Settings, Loader, Users, CheckCircle2 } from 'lucide-react';
 import { generateHostSpeech, GameContext } from '../services/gemini';
 import { globalAudioQueue } from '../services/audioUtils';
 import { voiceRecognition } from '../services/voiceRecognition';
@@ -9,6 +9,7 @@ import { checkAchievements, saveUnlockedAchievement, GameStats } from '../servic
 import { createDartThrow, createRound, COMMON_TARGETS, parseDartInput } from '../services/dartScoring';
 import { cameraService } from '../services/cameraService';
 import { analyzeDartboard, validateDetectedThrows } from '../services/visionAnalysis';
+import { processThrow, getInitialScore, getTargetLabel, CLOCK_SEQUENCE } from '../services/gameEngines';
 import ChatAssistant from './ChatAssistant';
 import CameraSettings from './CameraSettings';
 
@@ -21,7 +22,7 @@ interface GameScreenProps {
 const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
   // Game State
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0);
-  const [scores, setScores] = useState<number[]>([]);
+  const [scores, setScores] = useState<number[]>([]); // For Clock: This is the Target Index (0-20)
   const [playerRounds, setPlayerRounds] = useState<Round[][]>([]);
   const [currentThrows, setCurrentThrows] = useState<DartThrow[]>([]);
 
@@ -61,10 +62,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
 
   // Initial Game Setup
   useEffect(() => {
-    let start = 0;
-    if (mode === GameMode.X01) start = 501;
-    if (mode === GameMode.X01_301) start = 301;
-    if (mode === GameMode.CRICKET) start = 0;
+    const start = getInitialScore(mode);
 
     setScores(new Array(players.length).fill(start));
     setPlayerRounds(new Array(players.length).fill([]));
@@ -78,7 +76,11 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
       dartsThrown: 0
     }));
 
-    playVoice(`Welcome to ${mode}. ${players[0].alias}, you are up first!`);
+    const intro = mode === GameMode.CLOCK
+      ? `Welcome to Around the Clock. The target is 1. ${players[0].alias}, you're up!`
+      : `Welcome to ${mode}. ${players[0].alias}, you are up first!`;
+
+    playVoice(intro);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, players]);
 
@@ -204,22 +206,43 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
     let message = '';
     let isGameWon = false;
 
-    // Scoring Logic
-    if (mode === GameMode.X01 || mode === GameMode.X01_301) {
-      if (currentScore - roundTotal < 0 || currentScore - roundTotal === 1) {
-        message = `Bust! ${currentPlayer.alias} stays on ${currentScore}.`;
-      } else {
-        newScore = currentScore - roundTotal;
-        message = `${roundTotal} scored! ${newScore} remaining.`;
-        if (roundTotal > 100) message = `Wow! A massive ${roundTotal}!`;
-        if (newScore === 0) {
-          message = `Game Shot! ${currentPlayer.alias} wins the leg!`;
-          isGameWon = true;
+    // --- GAME ENGINE LOGIC ---
+    if (mode === GameMode.CLOCK) {
+      // Process each throw sequentially for Clock
+      let tempScore = currentScore;
+      let hits = 0;
+
+      throws.forEach(t => {
+        const result = processThrow(mode, currentStats, t, tempScore, currentPlayerIndex);
+        if (result.isValid && result.nextTarget !== undefined) {
+          tempScore = result.nextTarget;
+          hits++;
+          if (result.isWin) isGameWon = true;
         }
-      }
+      });
+
+      newScore = tempScore;
+      message = hits > 0 ? `${hits} hits! Moving to ${getTargetLabel(mode, newScore)}` : "No hits.";
+      if (isGameWon) message = `BULLSEYE! ${currentPlayer.alias} WINS THE GAME!`;
+
     } else {
-      newScore = currentScore + roundTotal;
-      message = `${roundTotal} points. Total is ${newScore}.`;
+      // Standard X01 Logic (Legacy)
+      if (mode === GameMode.X01 || mode === GameMode.X01_301) {
+        if (currentScore - roundTotal < 0 || currentScore - roundTotal === 1) {
+          message = `Bust! ${currentPlayer.alias} stays on ${currentScore}.`;
+        } else {
+          newScore = currentScore - roundTotal;
+          message = `${roundTotal} scored! ${newScore} remaining.`;
+          if (roundTotal > 100) message = `Wow! A massive ${roundTotal}!`;
+          if (newScore === 0) {
+            message = `Game Shot! ${currentPlayer.alias} wins the leg!`;
+            isGameWon = true;
+          }
+        }
+      } else {
+        newScore = currentScore + roundTotal;
+        message = `${roundTotal} points. Total is ${newScore}.`;
+      }
     }
 
     // Update Scores
@@ -273,7 +296,11 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
       // Delay slightly for natural flow
       setTimeout(() => {
         setCurrentPlayerIndex(nextPlayerIndex);
-        playVoice(`${message} ${nextPlayer.alias}, you're up!`);
+        const nextTarget = mode === GameMode.CLOCK ? getTargetLabel(mode, scores[nextPlayerIndex]) : '';
+        const nextMsg = mode === GameMode.CLOCK
+          ? `${message}. ${nextPlayer.alias}, aim for ${nextTarget}!`
+          : `${message} ${nextPlayer.alias}, you're up!`;
+        playVoice(nextMsg);
       }, 1500);
     } else {
       playVoice(message);
@@ -330,12 +357,17 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
               <div
                 key={p.id}
                 className={`flex items-center gap-2 px-3 py-1 rounded-full transition-all ${idx === currentPlayerIndex
-                    ? 'bg-dart-accent text-white ring-2 ring-white'
-                    : 'text-gray-500 opacity-50'
+                  ? 'bg-dart-accent text-white ring-2 ring-white'
+                  : 'text-gray-500 opacity-50'
                   }`}
               >
                 <img src={p.avatarUrl} alt={p.alias} className="w-6 h-6 rounded-full" />
                 <span className="text-sm font-bold hidden sm:inline">{p.alias}</span>
+                {mode === GameMode.CLOCK && (
+                  <span className="text-xs bg-gray-700 px-1 rounded text-dart-gold">
+                    Target: {getTargetLabel(mode, scores[idx])}
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -356,7 +388,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
       )}
 
       <div className="flex-1 flex flex-col lg:flex-row p-4 gap-4">
-        {/* Left: Score Display & Checkout */}
+        {/* Left: Score/Dashboard Display */}
         <div className="flex flex-col items-center justify-center lg:w-1/3">
           <h2 className="text-dart-gold uppercase tracking-widest text-sm mb-2">{mode}</h2>
 
@@ -366,25 +398,58 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
             <span className="text-dart-accent font-bold">{currentPlayer.alias}'s Turn</span>
           </div>
 
-          <div className="bg-dart-panel p-8 rounded-3xl border-4 border-dart-neon shadow-[0_0_20px_rgba(15,52,96,0.5)] min-w-[250px] text-center mb-4 relative">
-            <h1 className="text-7xl font-bold text-white brand-font tabular-nums">
-              {currentScore}
-            </h1>
-            {/* Opponent Scores Mini-View */}
-            <div className="absolute -right-32 top-0 hidden xl:block">
-              <div className="bg-gray-800 p-3 rounded-lg border border-gray-700">
-                <h4 className="text-xs text-gray-400 mb-2">Opponents</h4>
-                {players.map((p, idx) => idx !== currentPlayerIndex && (
-                  <div key={p.id} className="flex items-center gap-2 mb-2 last:mb-0">
-                    <img src={p.avatarUrl} className="w-6 h-6 rounded-full opacity-70" />
-                    <span className="text-gray-300 font-bold">{scores[idx]}</span>
-                  </div>
-                ))}
+          {/* DYNAMIC DASHBOARD */}
+          {mode === GameMode.CLOCK ? (
+            // --- AROUND THE CLOCK DASHBOARD ---
+            <div className="w-full max-w-sm">
+              <div className="bg-dart-panel p-6 rounded-3xl border-4 border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.5)] text-center mb-4">
+                <h3 className="text-gray-400 text-sm uppercase mb-2">Current Target</h3>
+                <h1 className="text-8xl font-bold text-white brand-font">
+                  {getTargetLabel(mode, currentScore)}
+                </h1>
+              </div>
+
+              {/* Clock Progress Track */}
+              <div className="bg-gray-800 p-4 rounded-xl flex flex-wrap gap-2 justify-center">
+                {CLOCK_SEQUENCE.map((num, idx) => {
+                  const isCompleted = idx < currentScore;
+                  const isCurrent = idx === currentScore;
+                  return (
+                    <div
+                      key={num}
+                      className={`w-8 h-8 flex items-center justify-center rounded-full text-xs font-bold ${isCompleted ? 'bg-green-600 text-white' :
+                          isCurrent ? 'bg-blue-500 text-white ring-2 ring-white scale-110' :
+                            'bg-gray-700 text-gray-500'
+                        }`}
+                    >
+                      {num === 25 ? 'B' : num}
+                    </div>
+                  );
+                })}
               </div>
             </div>
-          </div>
+          ) : (
+            // --- STANDARD SCOREBOARD ---
+            <div className="bg-dart-panel p-8 rounded-3xl border-4 border-dart-neon shadow-[0_0_20px_rgba(15,52,96,0.5)] min-w-[250px] text-center mb-4 relative">
+              <h1 className="text-7xl font-bold text-white brand-font tabular-nums">
+                {currentScore}
+              </h1>
+              {/* Opponent Scores Mini-View */}
+              <div className="absolute -right-32 top-0 hidden xl:block">
+                <div className="bg-gray-800 p-3 rounded-lg border border-gray-700">
+                  <h4 className="text-xs text-gray-400 mb-2">Opponents</h4>
+                  {players.map((p, idx) => idx !== currentPlayerIndex && (
+                    <div key={p.id} className="flex items-center gap-2 mb-2 last:mb-0">
+                      <img src={p.avatarUrl} className="w-6 h-6 rounded-full opacity-70" />
+                      <span className="text-gray-300 font-bold">{scores[idx]}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
-          {/* Checkout Suggestion */}
+          {/* Checkout Suggestion (Only for X01) */}
           {checkout && (
             <div className="bg-green-900/50 border-2 border-green-500 rounded-lg px-4 py-2 mb-4 flex items-center space-x-2">
               <Lightbulb className="h-5 w-5 text-green-400" />
@@ -393,7 +458,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
           )}
 
           {/* Current Round Progress */}
-          <div className="bg-dart-panel p-4 rounded-lg w-full max-w-sm">
+          <div className="bg-dart-panel p-4 rounded-lg w-full max-w-sm mt-4">
             <div className="flex justify-between items-center mb-2">
               <h3 className="text-gray-400 text-sm">Current Round ({currentThrows.length}/3)</h3>
               <span className="text-dart-gold font-bold">{getCurrentRoundTotal()}</span>
@@ -529,22 +594,33 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
 
           {/* Number Grid */}
           <div className="grid grid-cols-5 gap-2 mb-4">
-            {[20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5].map(num => (
-              <button
-                key={num}
-                onClick={() => handleNumberClick(num)}
-                className="bg-dart-panel hover:bg-gray-700 text-white font-bold py-3 rounded-lg border-b-4 border-gray-900 active:border-b-0 active:translate-y-1"
-              >
-                {num}
-              </button>
-            ))}
+            {[20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5].map(num => {
+              // Highlight current target in Clock mode
+              const isTarget = mode === GameMode.CLOCK && CLOCK_SEQUENCE[currentScore] === num;
+
+              return (
+                <button
+                  key={num}
+                  onClick={() => handleNumberClick(num)}
+                  className={`font-bold py-3 rounded-lg border-b-4 active:border-b-0 active:translate-y-1 transition-all ${isTarget
+                      ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-800 ring-2 ring-white scale-105 z-10'
+                      : 'bg-dart-panel hover:bg-gray-700 text-white border-gray-900'
+                    }`}
+                >
+                  {num}
+                </button>
+              );
+            })}
           </div>
 
           {/* Special Buttons */}
           <div className="grid grid-cols-3 gap-2 w-full max-w-sm">
             <button
               onClick={() => handleNumberClick(25)}
-              className="bg-yellow-900/50 hover:bg-yellow-800 border border-yellow-600 text-white font-bold py-3 rounded-lg"
+              className={`font-bold py-3 rounded-lg border border-yellow-600 ${mode === GameMode.CLOCK && CLOCK_SEQUENCE[currentScore] === 25
+                  ? 'bg-yellow-600 text-white ring-2 ring-white'
+                  : 'bg-yellow-900/50 hover:bg-yellow-800 text-white'
+                }`}
             >
               Bull
             </button>
