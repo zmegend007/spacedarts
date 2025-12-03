@@ -5,11 +5,11 @@ import GameScreen from './components/GameScreen';
 import { Player, GameMode } from './types';
 
 function App() {
-  const [player, setPlayer] = useState<Player | null>(null);
+  const [players, setPlayers] = useState<Player[]>([]);
   const [selectedGame, setSelectedGame] = useState<GameMode | null>(null);
 
-  if (!player) {
-    return <SetupScreen onComplete={setPlayer} />;
+  if (players.length === 0) {
+    return <SetupScreen onComplete={setPlayers} />;
   }
 
   if (!selectedGame) {
@@ -17,10 +17,10 @@ function App() {
   }
 
   return (
-    <GameScreen 
-      mode={selectedGame} 
-      player={player} 
-      onExit={() => setSelectedGame(null)} 
+    <GameScreen
+      mode={selectedGame}
+      players={players}
+      onExit={() => setSelectedGame(null)}
     />
   );
 }

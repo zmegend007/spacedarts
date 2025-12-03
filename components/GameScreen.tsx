@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Player, GameMode, DartThrow, Round, Multiplier, DetectedThrow } from '../types';
-import { Mic, MicOff, ArrowLeft, Lightbulb, Award, Target, Trash2, Camera, Settings, Loader } from 'lucide-react';
+import { Mic, MicOff, ArrowLeft, Lightbulb, Award, Target, Trash2, Camera, Settings, Loader, Users } from 'lucide-react';
 import { generateHostSpeech, GameContext } from '../services/gemini';
 import { globalAudioQueue } from '../services/audioUtils';
 import { voiceRecognition } from '../services/voiceRecognition';
@@ -14,26 +14,24 @@ import CameraSettings from './CameraSettings';
 
 interface GameScreenProps {
   mode: GameMode;
-  player: Player;
+  players: Player[];
   onExit: () => void;
 }
 
-const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
-  const [currentScore, setCurrentScore] = useState<number>(0);
-  const [rounds, setRounds] = useState<Round[]>([]);
+const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
+  // Game State
+  const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0);
+  const [scores, setScores] = useState<number[]>([]);
+  const [playerRounds, setPlayerRounds] = useState<Round[][]>([]);
   const [currentThrows, setCurrentThrows] = useState<DartThrow[]>([]);
+
+  // UI State
   const [isListening, setIsListening] = useState(false);
   const [showAchievement, setShowAchievement] = useState<string | null>(null);
   const [selectedMultiplier, setSelectedMultiplier] = useState<Multiplier>('S');
-  const [gameStats, setGameStats] = useState<GameStats>({
-    roundScores: [],
-    doublesHit: 0,
-    treblesHit: 0,
-    bullseyesHit: 0,
-    highestRound: 0,
-    gameWon: false,
-    dartsThrown: 0
-  });
+
+  // Stats per player
+  const [allGameStats, setAllGameStats] = useState<GameStats[]>([]);
 
   // Camera state
   const [showCameraSettings, setShowCameraSettings] = useState(false);
@@ -43,22 +41,46 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
   const [detectedThrows, setDetectedThrows] = useState<DetectedThrow[]>([]);
   const [lastCaptureUrl, setLastCaptureUrl] = useState<string | null>(null);
 
+  const currentPlayer = players[currentPlayerIndex];
+  const currentScore = scores[currentPlayerIndex] || 0;
+  const currentRounds = playerRounds[currentPlayerIndex] || [];
+  const currentStats = allGameStats[currentPlayerIndex] || {
+    roundScores: [],
+    doublesHit: 0,
+    treblesHit: 0,
+    bullseyesHit: 0,
+    highestRound: 0,
+    gameWon: false,
+    dartsThrown: 0
+  };
+
   // Check if camera is enabled on mount
   useEffect(() => {
     setCameraEnabled(cameraService.isEnabled());
   }, []);
 
-  // Initial Score logic based on mode
+  // Initial Game Setup
   useEffect(() => {
     let start = 0;
     if (mode === GameMode.X01) start = 501;
     if (mode === GameMode.X01_301) start = 301;
     if (mode === GameMode.CRICKET) start = 0;
-    setCurrentScore(start);
 
-    playVoice(`Welcome to ${mode}. ${player.alias}, step up to the oche!`);
+    setScores(new Array(players.length).fill(start));
+    setPlayerRounds(new Array(players.length).fill([]));
+    setAllGameStats(new Array(players.length).fill({
+      roundScores: [],
+      doublesHit: 0,
+      treblesHit: 0,
+      bullseyesHit: 0,
+      highestRound: 0,
+      gameWon: false,
+      dartsThrown: 0
+    }));
+
+    playVoice(`Welcome to ${mode}. ${players[0].alias}, you are up first!`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, player.alias]);
+  }, [mode, players]);
 
   const playVoice = async (text: string) => {
     try {
@@ -110,20 +132,15 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
     setLastCaptureUrl(null);
 
     try {
-      // Capture frame from camera
       const blob = await cameraService.captureFrame();
-      if (!blob) {
-        throw new Error('Failed to capture frame');
-      }
+      if (!blob) throw new Error('Failed to capture frame');
 
-      // Create preview URL
       const url = URL.createObjectURL(blob);
       setLastCaptureUrl(url);
 
       setCapturing(false);
       setAnalyzing(true);
 
-      // Convert to base64 and analyze
       const base64 = await cameraService.blobToBase64(blob);
       const result = await analyzeDartboard(base64);
 
@@ -134,7 +151,6 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
         return;
       }
 
-      // Validate and set detected throws
       const validThrows = validateDetectedThrows(result.throws);
       setDetectedThrows(validThrows);
 
@@ -168,7 +184,6 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
     const newThrows = [...currentThrows, dartThrow];
     setCurrentThrows(newThrows);
 
-    // Auto-complete round after 3 darts
     if (newThrows.length === 3) {
       completeRound(newThrows);
     }
@@ -189,45 +204,52 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
     let message = '';
     let isGameWon = false;
 
+    // Scoring Logic
     if (mode === GameMode.X01 || mode === GameMode.X01_301) {
       if (currentScore - roundTotal < 0 || currentScore - roundTotal === 1) {
-        message = `Bust! You scored ${roundTotal} but needed ${currentScore}.`;
-        // Don't update score on bust
+        message = `Bust! ${currentPlayer.alias} stays on ${currentScore}.`;
       } else {
         newScore = currentScore - roundTotal;
         message = `${roundTotal} scored! ${newScore} remaining.`;
-        if (roundTotal > 100) message = `Wow! A massive ${roundTotal}! ${newScore} left.`;
+        if (roundTotal > 100) message = `Wow! A massive ${roundTotal}!`;
         if (newScore === 0) {
-          message = `Game Shot! ${player.alias} wins the leg!`;
+          message = `Game Shot! ${currentPlayer.alias} wins the leg!`;
           isGameWon = true;
         }
-        setCurrentScore(newScore);
       }
     } else {
       newScore = currentScore + roundTotal;
       message = `${roundTotal} points. Total is ${newScore}.`;
-      setCurrentScore(newScore);
     }
 
-    // Update stats
+    // Update Scores
+    const newScores = [...scores];
+    newScores[currentPlayerIndex] = newScore;
+    setScores(newScores);
+
+    // Update Stats
     const doublesInRound = throws.filter(t => t.multiplier === 'D').length;
     const treblesInRound = throws.filter(t => t.multiplier === 'T').length;
     const bullsInRound = throws.filter(t => t.number === 25).length;
 
-    const allRoundScores = [...rounds.map(r => r.total), roundTotal];
+    const allRoundScores = [...currentRounds.map(r => r.total), roundTotal];
     const newStats: GameStats = {
       roundScores: allRoundScores,
-      doublesHit: gameStats.doublesHit + doublesInRound,
-      treblesHit: gameStats.treblesHit + treblesInRound,
-      bullseyesHit: gameStats.bullseyesHit + bullsInRound,
-      highestRound: Math.max(gameStats.highestRound, roundTotal),
+      doublesHit: currentStats.doublesHit + doublesInRound,
+      treblesHit: currentStats.treblesHit + treblesInRound,
+      bullseyesHit: currentStats.bullseyesHit + bullsInRound,
+      highestRound: Math.max(currentStats.highestRound, roundTotal),
       gameWon: isGameWon,
       checkoutScore: isGameWon ? roundTotal : undefined,
-      dartsThrown: gameStats.dartsThrown + throws.length
+      dartsThrown: currentStats.dartsThrown + throws.length
     };
 
-    // Check achievements
-    const unlockedAchievements = checkAchievements(newStats, gameStats);
+    const newAllStats = [...allGameStats];
+    newAllStats[currentPlayerIndex] = newStats;
+    setAllGameStats(newAllStats);
+
+    // Check Achievements
+    const unlockedAchievements = checkAchievements(newStats, currentStats);
     if (unlockedAchievements.length > 0) {
       const achievement = unlockedAchievements[0];
       saveUnlockedAchievement(achievement.id);
@@ -236,10 +258,26 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
       setTimeout(() => setShowAchievement(null), 5000);
     }
 
-    setGameStats(newStats);
-    setRounds([...rounds, round]);
+    // Update Rounds
+    const newPlayerRounds = [...playerRounds];
+    newPlayerRounds[currentPlayerIndex] = [...currentRounds, round];
+    setPlayerRounds(newPlayerRounds);
+
     setCurrentThrows([]);
-    playVoice(message);
+
+    // Turn Switching
+    if (!isGameWon) {
+      const nextPlayerIndex = (currentPlayerIndex + 1) % players.length;
+      const nextPlayer = players[nextPlayerIndex];
+
+      // Delay slightly for natural flow
+      setTimeout(() => {
+        setCurrentPlayerIndex(nextPlayerIndex);
+        playVoice(`${message} ${nextPlayer.alias}, you're up!`);
+      }, 1500);
+    } else {
+      playVoice(message);
+    }
   };
 
   const undoLastThrow = () => {
@@ -252,17 +290,15 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
     return currentThrows.reduce((sum, dart) => sum + dart.score, 0);
   };
 
-  // Get checkout suggestion
   const checkout = (mode === GameMode.X01 || mode === GameMode.X01_301) && currentScore <= 170
     ? calculateCheckout(currentScore)
     : null;
 
-  // Game context for chat
   const gameContext: GameContext = {
     mode: mode,
     currentScore: currentScore,
-    roundHistory: rounds.map(r => r.total),
-    playerAlias: player.alias
+    roundHistory: currentRounds.map(r => r.total),
+    playerAlias: currentPlayer.alias
   };
 
   return (
@@ -273,7 +309,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
           <ArrowLeft className="h-5 w-5" />
           <span>Exit Game</span>
         </button>
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-4">
           {cameraEnabled && (
             <div className="flex items-center gap-2 text-green-400 text-sm">
               <Camera className="h-4 w-4" />
@@ -287,8 +323,22 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
           >
             <Settings className="h-5 w-5" />
           </button>
-          <img src={player.avatarUrl} alt={player.alias} className="w-10 h-10 rounded-full border border-dart-accent" />
-          <span className="font-bold text-white hidden sm:inline">{player.alias}</span>
+
+          {/* Player Indicators */}
+          <div className="flex items-center gap-2 bg-gray-800 p-1 rounded-full">
+            {players.map((p, idx) => (
+              <div
+                key={p.id}
+                className={`flex items-center gap-2 px-3 py-1 rounded-full transition-all ${idx === currentPlayerIndex
+                    ? 'bg-dart-accent text-white ring-2 ring-white'
+                    : 'text-gray-500 opacity-50'
+                  }`}
+              >
+                <img src={p.avatarUrl} alt={p.alias} className="w-6 h-6 rounded-full" />
+                <span className="text-sm font-bold hidden sm:inline">{p.alias}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -309,10 +359,29 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
         {/* Left: Score Display & Checkout */}
         <div className="flex flex-col items-center justify-center lg:w-1/3">
           <h2 className="text-dart-gold uppercase tracking-widest text-sm mb-2">{mode}</h2>
-          <div className="bg-dart-panel p-8 rounded-3xl border-4 border-dart-neon shadow-[0_0_20px_rgba(15,52,96,0.5)] min-w-[250px] text-center mb-4">
+
+          {/* Active Player Badge */}
+          <div className="flex items-center gap-2 mb-4 bg-dart-panel px-4 py-2 rounded-full border border-dart-accent/30">
+            <img src={currentPlayer.avatarUrl} alt={currentPlayer.alias} className="w-8 h-8 rounded-full" />
+            <span className="text-dart-accent font-bold">{currentPlayer.alias}'s Turn</span>
+          </div>
+
+          <div className="bg-dart-panel p-8 rounded-3xl border-4 border-dart-neon shadow-[0_0_20px_rgba(15,52,96,0.5)] min-w-[250px] text-center mb-4 relative">
             <h1 className="text-7xl font-bold text-white brand-font tabular-nums">
               {currentScore}
             </h1>
+            {/* Opponent Scores Mini-View */}
+            <div className="absolute -right-32 top-0 hidden xl:block">
+              <div className="bg-gray-800 p-3 rounded-lg border border-gray-700">
+                <h4 className="text-xs text-gray-400 mb-2">Opponents</h4>
+                {players.map((p, idx) => idx !== currentPlayerIndex && (
+                  <div key={p.id} className="flex items-center gap-2 mb-2 last:mb-0">
+                    <img src={p.avatarUrl} className="w-6 h-6 rounded-full opacity-70" />
+                    <span className="text-gray-300 font-bold">{scores[idx]}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           {/* Checkout Suggestion */}
@@ -498,13 +567,13 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
         <div className="lg:w-1/3 bg-dart-panel p-4 rounded-lg overflow-y-auto max-h-[600px]">
           <h3 className="text-gray-400 text-sm mb-3 flex items-center gap-2">
             <Target className="h-4 w-4" />
-            Round History
+            {currentPlayer.alias}'s History
           </h3>
           <div className="space-y-2">
-            {rounds.slice().reverse().map((round, idx) => (
-              <div key={rounds.length - idx} className="bg-gray-800 p-3 rounded-lg">
+            {currentRounds.slice().reverse().map((round, idx) => (
+              <div key={currentRounds.length - idx} className="bg-gray-800 p-3 rounded-lg">
                 <div className="flex justify-between items-center mb-2">
-                  <span className="text-gray-400 text-xs">Round {rounds.length - idx}</span>
+                  <span className="text-gray-400 text-xs">Round {currentRounds.length - idx}</span>
                   <span className="text-dart-gold font-bold">{round.total}</span>
                 </div>
                 <div className="flex gap-2">
@@ -522,7 +591,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, player, onExit }) => {
                 </div>
               </div>
             ))}
-            {rounds.length === 0 && (
+            {currentRounds.length === 0 && (
               <div className="text-gray-500 text-center py-8">
                 No rounds yet. Start throwing!
               </div>
