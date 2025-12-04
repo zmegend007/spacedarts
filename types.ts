@@ -42,16 +42,3 @@ export interface Round {
   timestamp: number;
 }
 
-// Camera integration types
-export interface CameraConfig {
-  ipAddress: string;
-  port?: number;
-  snapshotPath?: string;
-  username?: string;
-  password?: string;
-  enabled: boolean;
-}
-
-export interface DetectedThrow extends DartThrow {
-  confidence: number;
-}

@@ -1,17 +1,19 @@
-import React, { useState, useEffect } from 'react';
-import { Player, GameMode, DartThrow, Round, Multiplier, DetectedThrow } from '../types';
-import { Mic, MicOff, ArrowLeft, Lightbulb, Award, Target, Trash2, Camera, Settings, Loader, Users, CheckCircle2 } from 'lucide-react';
-import { generateHostSpeech, GameContext } from '../services/gemini';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Player, GameMode, DartThrow, Round, Multiplier } from '../types';
+import { Mic, MicOff, ArrowLeft, Lightbulb, Award, Target, Trash2, Settings, Wifi } from 'lucide-react';
+import { generateHostSpeech, GameContext, generateGameCommentary, GameEventType } from '../services/gemini';
 import { globalAudioQueue } from '../services/audioUtils';
 import { voiceRecognition } from '../services/voiceRecognition';
 import { calculateCheckout } from '../services/checkoutCalculator';
 import { checkAchievements, saveUnlockedAchievement, GameStats } from '../services/achievements';
 import { createDartThrow, createRound, COMMON_TARGETS, parseDartInput } from '../services/dartScoring';
-import { cameraService } from '../services/cameraService';
-import { analyzeDartboard, validateDetectedThrows } from '../services/visionAnalysis';
 import { processThrow, getInitialScore, getTargetLabel, CLOCK_SEQUENCE } from '../services/gameEngines';
+import { autodartsService } from '../services/autodartsService';
+import { createGame, saveGame } from '../services/firestoreService';
+import { logGameStart, logGameEnd, logDartThrow } from '../services/analyticsService';
 import ChatAssistant from './ChatAssistant';
-import CameraSettings from './CameraSettings';
+import AutodartsSettings from './AutodartsSettings';
+import { useToast } from './Toast';
 
 interface GameScreenProps {
   mode: GameMode;
@@ -20,6 +22,7 @@ interface GameScreenProps {
 }
 
 const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
+  const { showToast } = useToast();
   // Game State
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0);
   const [scores, setScores] = useState<number[]>([]); // For Clock: This is the Target Index (0-20)
@@ -34,13 +37,12 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
   // Stats per player
   const [allGameStats, setAllGameStats] = useState<GameStats[]>([]);
 
-  // Camera state
-  const [showCameraSettings, setShowCameraSettings] = useState(false);
-  const [cameraEnabled, setCameraEnabled] = useState(false);
-  const [capturing, setCapturing] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [detectedThrows, setDetectedThrows] = useState<DetectedThrow[]>([]);
-  const [lastCaptureUrl, setLastCaptureUrl] = useState<string | null>(null);
+  // Autodarts state
+  const [showAutodartsSettings, setShowAutodartsSettings] = useState(false);
+  const [autodartsConnected, setAutodartsConnected] = useState(false);
+
+  // Firebase state
+  const [gameId, setGameId] = useState<string | null>(null);
 
   const currentPlayer = players[currentPlayerIndex];
   const currentScore = scores[currentPlayerIndex] || 0;
@@ -55,15 +57,36 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
     dartsThrown: 0
   };
 
-  // Check if camera is enabled on mount
-  useEffect(() => {
-    setCameraEnabled(cameraService.isEnabled());
+  const playVoice = useCallback(async (text: string) => {
+    try {
+      const audioBase64 = await generateHostSpeech(text);
+      await globalAudioQueue.playBase64(audioBase64);
+    } catch (e) {
+      console.error("Audio playback error", e);
+    }
   }, []);
 
-  // Initial Game Setup
+  // Initial Game Setup & Persistence Loading
   useEffect(() => {
-    const start = getInitialScore(mode);
+    const savedState = localStorage.getItem('dartmaster_gamestate');
+    if (savedState) {
+      try {
+        const parsed = JSON.parse(savedState);
+        // Only load if mode matches (basic check)
+        if (parsed.mode === mode && parsed.players.length === players.length) {
+          setScores(parsed.scores);
+          setPlayerRounds(parsed.playerRounds);
+          setCurrentPlayerIndex(parsed.currentPlayerIndex);
+          setAllGameStats(parsed.allGameStats);
+          return; // Skip default init
+        }
+      } catch (e) {
+        console.error("Failed to load saved game", e);
+      }
+    }
 
+    // Default Initialization
+    const start = getInitialScore(mode);
     setScores(new Array(players.length).fill(start));
     setPlayerRounds(new Array(players.length).fill([]));
     setAllGameStats(new Array(players.length).fill({
@@ -80,24 +103,51 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
       ? `Welcome to Around the Clock. The target is 1. ${players[0].alias}, you're up!`
       : `Welcome to ${mode}. ${players[0].alias}, you are up first!`;
 
-    playVoice(intro);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, players]);
+    // Temporarily disabled to debug crash
+    // playVoice(intro);
 
-  const playVoice = async (text: string) => {
-    try {
-      const audioBase64 = await generateHostSpeech(text);
-      if (audioBase64) {
-        await globalAudioQueue.playBase64(audioBase64);
-      }
-    } catch (e) {
-      console.error("Audio playback error", e);
+    // Create game in Firebase
+    createGame({
+      player1Name: players[0].alias,
+      player2Name: players.length > 1 ? players[1].alias : 'CPU',
+      player1Score: start,
+      player2Score: players.length > 1 ? start : start,
+      currentPlayer: 1,
+      gameMode: mode
+    }).then((id) => {
+      setGameId(id);
+      console.log('Game created in Firebase:', id);
+      showToast('success', 'Game saved to Firebase!');
+      logGameStart(mode, players.length);
+    }).catch((error) => {
+      console.error('Failed to create game:', error);
+      showToast('error', 'Failed to save game');
+    });
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, players]); // Re-run only if mode/players change (new game)
+
+
+
+  // Persist Game State on Change
+  useEffect(() => {
+    if (scores.length > 0) {
+      const stateToSave = {
+        mode,
+        players, // Store players to verify match on load
+        scores,
+        playerRounds,
+        currentPlayerIndex,
+        allGameStats
+      };
+      localStorage.setItem('dartmaster_gamestate', JSON.stringify(stateToSave));
     }
-  };
+  }, [scores, playerRounds, currentPlayerIndex, allGameStats, mode, players]);
+
 
   const handleVoiceToggle = () => {
     if (!voiceRecognition.isSupported()) {
-      alert('Voice recognition is not supported in your browser. Try Chrome or Edge.');
+      showToast('warning', 'Voice recognition is not supported in your browser. Try Chrome or Edge.');
       return;
     }
 
@@ -123,64 +173,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
     }
   };
 
-  const handleCaptureAndAnalyze = async () => {
-    if (!cameraEnabled) {
-      alert('Camera not enabled. Please configure in settings.');
-      return;
-    }
 
-    setCapturing(true);
-    setDetectedThrows([]);
-    setLastCaptureUrl(null);
-
-    try {
-      const blob = await cameraService.captureFrame();
-      if (!blob) throw new Error('Failed to capture frame');
-
-      const url = URL.createObjectURL(blob);
-      setLastCaptureUrl(url);
-
-      setCapturing(false);
-      setAnalyzing(true);
-
-      const base64 = await cameraService.blobToBase64(blob);
-      const result = await analyzeDartboard(base64);
-
-      setAnalyzing(false);
-
-      if (!result.success) {
-        alert(`Analysis failed: ${result.error || 'Unknown error'}`);
-        return;
-      }
-
-      const validThrows = validateDetectedThrows(result.throws);
-      setDetectedThrows(validThrows);
-
-      if (validThrows.length === 0) {
-        playVoice('No darts detected. Try again or enter manually.');
-      } else {
-        playVoice(`Detected ${validThrows.length} dart${validThrows.length > 1 ? 's' : ''}`);
-      }
-    } catch (error) {
-      console.error('Capture/analysis error:', error);
-      alert(`Error: ${error instanceof Error ? error.message : 'Capture failed'}`);
-      setCapturing(false);
-      setAnalyzing(false);
-    }
-  };
-
-  const acceptDetectedThrows = () => {
-    detectedThrows.forEach(dart => {
-      addDartThrow(dart);
-    });
-    setDetectedThrows([]);
-    setLastCaptureUrl(null);
-  };
-
-  const rejectDetectedThrows = () => {
-    setDetectedThrows([]);
-    setLastCaptureUrl(null);
-  };
 
   const addDartThrow = (dartThrow: DartThrow) => {
     const newThrows = [...currentThrows, dartThrow];
@@ -294,16 +287,94 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
       const nextPlayer = players[nextPlayerIndex];
 
       // Delay slightly for natural flow
-      setTimeout(() => {
+      setTimeout(async () => {
         setCurrentPlayerIndex(nextPlayerIndex);
+
+        // AI Commentary Logic
+        let aiCommentary = '';
+
+        // Calculate Match Context
+        const opponentIndex = (currentPlayerIndex + 1) % players.length;
+        const opponentScore = scores[opponentIndex];
+        const opponentAlias = players[opponentIndex].alias;
+
+        let scoreDiff = 0;
+        let stage: 'OPENING' | 'MIDGAME' | 'ENDGAME' = 'MIDGAME';
+
+        if (mode === GameMode.CLOCK) {
+          scoreDiff = newScore - opponentScore;
+          if (newScore <= 5) stage = 'OPENING';
+          else if (newScore >= 15) stage = 'ENDGAME';
+        } else {
+          scoreDiff = opponentScore - newScore; // X01: Lower is better
+          if (newScore > 300) stage = 'OPENING';
+          else if (newScore <= 100) stage = 'ENDGAME';
+        }
+
+        const context: GameContext = {
+          mode,
+          currentScore: newScore,
+          roundHistory: [...currentRounds.map(r => r.total), roundTotal],
+          playerAlias: currentPlayer.alias,
+          opponentAlias,
+          opponentScore,
+          scoreDifference: scoreDiff,
+          gameStage: stage
+        };
+
+        // Generate commentary for interesting events
+        if (roundTotal >= 100) {
+          aiCommentary = await generateGameCommentary(context, 'HIGH_SCORE', `Scored ${roundTotal}`);
+        } else if (roundTotal < 20 && mode !== GameMode.CLOCK && roundTotal > 0) {
+          aiCommentary = await generateGameCommentary(context, 'BAD_ROUND', `Scored ${roundTotal}`);
+        } else if (mode === GameMode.X01 && newScore <= 170 && calculateCheckout(newScore)) {
+          aiCommentary = await generateGameCommentary(context, 'CHECKOUT_READY', `Needs ${newScore}`);
+        }
+
         const nextTarget = mode === GameMode.CLOCK ? getTargetLabel(mode, scores[nextPlayerIndex]) : '';
-        const nextMsg = mode === GameMode.CLOCK
-          ? `${message}. ${nextPlayer.alias}, aim for ${nextTarget}!`
-          : `${message} ${nextPlayer.alias}, you're up!`;
-        playVoice(nextMsg);
+
+        let finalMsg = '';
+        if (aiCommentary) {
+          // If we have AI commentary, use it but keep the flow moving
+          finalMsg = `${message}. ${aiCommentary}. ${nextPlayer.alias}, you're up!`;
+        } else {
+          // Standard fallback
+          finalMsg = mode === GameMode.CLOCK
+            ? `${message}. ${nextPlayer.alias}, aim for ${nextTarget}!`
+            : `${message} ${nextPlayer.alias}, you're up!`;
+        }
+
+        playVoice(finalMsg);
+
+        // Auto-save game state
+        if (gameId) {
+          saveGame(gameId, {
+            player1Score: currentPlayerIndex === 0 ? newScore : scores[0],
+            player2Score: currentPlayerIndex === 1 ? newScore : scores[1],
+            currentPlayer: nextPlayerIndex + 1
+          });
+        }
       }, 1500);
     } else {
-      playVoice(message);
+      // Game Won Logic
+      (async () => {
+        const context: GameContext = {
+          mode,
+          currentScore: newScore,
+          roundHistory: [...currentRounds.map(r => r.total), roundTotal],
+          playerAlias: currentPlayer.alias
+        };
+        const victorySpeech = await generateGameCommentary(context, 'GAME_WON');
+        playVoice(victorySpeech || message);
+
+        if (gameId) {
+          saveGame(gameId, {
+            winner: currentPlayer.alias,
+            completedAt: new Date() as any // Cast to any to avoid timestamp issues for now
+          });
+          logGameEnd(mode, currentPlayer.alias, 0, newScore); // Duration 0 for now
+        }
+      })();
     }
   };
 
@@ -327,6 +398,19 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
     roundHistory: currentRounds.map(r => r.total),
     playerAlias: currentPlayer.alias
   };
+  // Autodarts Integration
+  useEffect(() => {
+    const handleDartThrow = (dart: DartThrow) => {
+      console.log('Autodarts throw received:', dart);
+      addDartThrow(dart);
+    };
+
+    autodartsService.onDartThrow(handleDartThrow);
+
+    return () => {
+      autodartsService.off('dart_throw');
+    };
+  }, [addDartThrow]);
 
   return (
     <div className="min-h-screen bg-dart-dark flex flex-col">
@@ -337,16 +421,16 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
           <span>Exit Game</span>
         </button>
         <div className="flex items-center space-x-4">
-          {cameraEnabled && (
+          {autodartsConnected && (
             <div className="flex items-center gap-2 text-green-400 text-sm">
-              <Camera className="h-4 w-4" />
-              <span className="hidden sm:inline">Camera Active</span>
+              <Wifi className="h-4 w-4" />
+              <span className="hidden sm:inline">Autodarts Connected</span>
             </div>
           )}
           <button
-            onClick={() => setShowCameraSettings(true)}
+            onClick={() => setShowAutodartsSettings(true)}
             className="text-gray-400 hover:text-white"
-            title="Camera Settings"
+            title="Autodarts Settings"
           >
             <Settings className="h-5 w-5" />
           </button>
@@ -418,8 +502,8 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
                     <div
                       key={num}
                       className={`w-8 h-8 flex items-center justify-center rounded-full text-xs font-bold ${isCompleted ? 'bg-green-600 text-white' :
-                          isCurrent ? 'bg-blue-500 text-white ring-2 ring-white scale-110' :
-                            'bg-gray-700 text-gray-500'
+                        isCurrent ? 'bg-blue-500 text-white ring-2 ring-white scale-110' :
+                          'bg-gray-700 text-gray-500'
                         }`}
                     >
                       {num === 25 ? 'B' : num}
@@ -494,71 +578,7 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
             </div>
           </div>
 
-          {/* Camera Capture Panel */}
-          {cameraEnabled && (
-            <div className="bg-dart-panel p-4 rounded-lg w-full max-w-sm mt-4">
-              <h3 className="text-gray-400 text-sm mb-3 flex items-center gap-2">
-                <Camera className="h-4 w-4" />
-                AI Dart Detection
-              </h3>
 
-              <button
-                onClick={handleCaptureAndAnalyze}
-                disabled={capturing || analyzing}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white py-3 rounded-lg font-bold flex items-center justify-center gap-2 mb-3"
-              >
-                {capturing ? (
-                  <>
-                    <Loader className="h-5 w-5 animate-spin" />
-                    Capturing...
-                  </>
-                ) : analyzing ? (
-                  <>
-                    <Loader className="h-5 w-5 animate-spin" />
-                    Analyzing...
-                  </>
-                ) : (
-                  <>
-                    <Camera className="h-5 w-5" />
-                    Capture & Analyze
-                  </>
-                )}
-              </button>
-
-              {/* Detected Throws */}
-              {detectedThrows.length > 0 && (
-                <div className="bg-gray-800 p-3 rounded-lg">
-                  <div className="text-green-400 text-sm font-semibold mb-2">
-                    Detected {detectedThrows.length} dart{detectedThrows.length > 1 ? 's' : ''}:
-                  </div>
-                  <div className="flex gap-2 mb-3">
-                    {detectedThrows.map((dart, idx) => (
-                      <div key={idx} className="bg-gray-700 px-3 py-2 rounded">
-                        <div className="text-white font-bold">{dart.display}</div>
-                        <div className="text-gray-400 text-xs">
-                          {Math.round(dart.confidence * 100)}%
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={acceptDetectedThrows}
-                      className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 rounded font-semibold"
-                    >
-                      ✓ Accept
-                    </button>
-                    <button
-                      onClick={rejectDetectedThrows}
-                      className="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 rounded font-semibold"
-                    >
-                      ✗ Reject
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Center: Dart Input */}
@@ -603,8 +623,8 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
                   key={num}
                   onClick={() => handleNumberClick(num)}
                   className={`font-bold py-3 rounded-lg border-b-4 active:border-b-0 active:translate-y-1 transition-all ${isTarget
-                      ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-800 ring-2 ring-white scale-105 z-10'
-                      : 'bg-dart-panel hover:bg-gray-700 text-white border-gray-900'
+                    ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-800 ring-2 ring-white scale-105 z-10'
+                    : 'bg-dart-panel hover:bg-gray-700 text-white border-gray-900'
                     }`}
                 >
                   {num}
@@ -618,8 +638,8 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
             <button
               onClick={() => handleNumberClick(25)}
               className={`font-bold py-3 rounded-lg border border-yellow-600 ${mode === GameMode.CLOCK && CLOCK_SEQUENCE[currentScore] === 25
-                  ? 'bg-yellow-600 text-white ring-2 ring-white'
-                  : 'bg-yellow-900/50 hover:bg-yellow-800 text-white'
+                ? 'bg-yellow-600 text-white ring-2 ring-white'
+                : 'bg-yellow-900/50 hover:bg-yellow-800 text-white'
                 }`}
             >
               Bull
@@ -679,11 +699,11 @@ const GameScreen: React.FC<GameScreenProps> = ({ mode, players, onExit }) => {
       {/* Floating Chat with Game Context */}
       <ChatAssistant gameContext={gameContext} />
 
-      {/* Camera Settings Modal */}
-      {showCameraSettings && (
-        <CameraSettings onClose={() => {
-          setShowCameraSettings(false);
-          setCameraEnabled(cameraService.isEnabled());
+      {/* Autodarts Settings Modal */}
+      {showAutodartsSettings && (
+        <AutodartsSettings onClose={() => {
+          setShowAutodartsSettings(false);
+          setAutodartsConnected(autodartsService.isConnected());
         }} />
       )}
     </div>

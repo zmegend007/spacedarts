@@ -90,6 +90,42 @@ export const editAvatar = async (currentImageBase64: string, prompt: string): Pr
   }
 };
 
+export interface PlayerAnswers {
+  style: string;
+  spirit: string;
+  vibe: string;
+}
+
+export const generateAvatarDescription = async (
+  name: string,
+  answers: PlayerAnswers
+): Promise<string> => {
+  try {
+    const prompt = `Create a vivid, creative avatar description for a dart player named "${name}".
+
+Their throwing style: ${answers.style}
+Their spirit animal: ${answers.spirit}
+Their dartboard vibe: ${answers.vibe}
+
+Generate a 2-3 sentence description that combines these elements into a unique dart player persona. Make it fun, visual, and memorable. Focus on creating a character that would make a great image. Be creative and descriptive!
+
+Example format: "A precision sniper with the sharp eyes of an eagle, bringing neon cyberpunk energy to every throw. Known for calculated moves and futuristic style."`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        temperature: 0.9,
+      }
+    });
+
+    return response.text?.trim() || `${name}, the ${answers.style} with ${answers.spirit} energy.`;
+  } catch (error) {
+    console.error("Description generation failed:", error);
+    return `${name}, a legendary dart player with ${answers.style} style.`;
+  }
+};
+
 export const generateHostSpeech = async (text: string): Promise<string | null> => {
   try {
     const response = await ai.models.generateContent({
@@ -118,7 +154,60 @@ export interface GameContext {
   currentScore: number;
   roundHistory: number[];
   playerAlias: string;
+  opponentAlias?: string;
+  opponentScore?: number;
+  scoreDifference?: number; // Positive = Leading, Negative = Trailing
+  gameStage?: 'OPENING' | 'MIDGAME' | 'ENDGAME';
 }
+
+export type GameEventType = 'ROUND_END' | 'HIGH_SCORE' | 'BAD_ROUND' | 'CHECKOUT_READY' | 'GAME_WON' | 'GAME_LOST' | 'BUST';
+
+export const generateGameCommentary = async (
+  context: GameContext,
+  eventType: GameEventType,
+  eventData?: string
+): Promise<string> => {
+  try {
+    const prompt = `You are a legendary, high-energy darts commentator (like Sid Waddell). 
+    Generate a SHORT, witty, enthusiastic 1-sentence commentary for this moment.
+    
+    Context:
+    - Player: ${context.playerAlias}
+    - Mode: ${context.mode}
+    - Score: ${context.currentScore}
+    - Opponent: ${context.opponentAlias || 'None'}
+    - Lead/Deficit: ${context.scoreDifference ? (context.scoreDifference > 0 ? 'Leading by ' + context.scoreDifference : 'Trailing by ' + Math.abs(context.scoreDifference)) : 'N/A'}
+    - Stage: ${context.gameStage || 'N/A'}
+    - Event: ${eventType}
+    - Details: ${eventData || 'None'}
+    
+    Style:
+    - Use metaphors, be dramatic, maybe a bit roasting if it's a bad round.
+    - If it's a close game (diff < 50), mention the pressure.
+    - If trailing big (> 100), mention the comeback needed.
+    - Keep it under 15 words so it can be spoken quickly.
+    - NO hashtags, NO emojis. Just spoken text.
+    
+    Examples:
+    - (High Score): "He's throwing arrows like they're laser beams! Magnificent!"
+    - (Bad Round): "Oh dear, that's more like a knitting circle than a darts match!"
+    - (Checkout): "One dart away from glory! Can he hold his nerve?"`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        temperature: 1.0, // High creativity
+        maxOutputTokens: 50,
+      }
+    });
+
+    return response.text?.trim() || "";
+  } catch (error) {
+    console.error("Commentary generation failed:", error);
+    return ""; // Fail silently, fallback to standard audio
+  }
+};
 
 export const chatWithBot = async (
   history: { role: 'user' | 'model', text: string }[],
